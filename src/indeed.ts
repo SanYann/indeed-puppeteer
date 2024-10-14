@@ -1,46 +1,89 @@
-import chromium from "chrome-aws-lambda";
 import puppeteerExtra from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import chromium from "@sparticuz/chromium"
+import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
+import Anonymize from "puppeteer-extra-plugin-anonymize-ua";
+import createPuppeteerStealth from "puppeteer-extra-plugin-stealth";
+import * as fs from "fs";
+import wait from "promisify-wait";
+
+const puppeteerStealth = createPuppeteerStealth();
+puppeteerStealth.enabledEvasions.delete("user-agent-override");
 
 // Use stealth plugin to avoid detection
-puppeteerExtra.use(StealthPlugin());
+puppeteerExtra.use(AdblockerPlugin()).use(puppeteerStealth).use(Anonymize());
 
-async function scrapeIndeedJobDetails(): Promise<any> {
+
+declare global {
+  interface Window {
+    _cf_chl_opt?: {
+      __cf_chl_rt_tk?: string;
+      cRay?: string;
+      cHash?: string;
+    };
+  }
+}
+
+export const postHandler = async (
+  event: any
+) => {
+  const IS_LOCAL = true 
+  console.log("test")
   let browser = null;
-
+  console.log(await chromium.executablePath())
   try {
     browser = await puppeteerExtra.launch({
+      args:  IS_LOCAL ? puppeteerExtra.defaultArgs() : chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: (await chromium.executablePath) || undefined,
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--disable-gpu",
-      ],
+      ...(IS_LOCAL ? {}: {executablePath:  await chromium.executablePath()}),
+      headless: "shell"
+      
     });
+    console.log("browser")
+    let page = await browser.newPage();
+    console.log("page")
 
-    const page = await browser.newPage();
-
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36"
+    );
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+      Referer: "https://fr.indeed.com/",
+    });
     let hasNextPage = true;
     const allJobDetails: any[] = [];
+
     // Navigate to the Indeed job search page
     const indeedUrl =
-      "https://ch-fr.indeed.com/jobs?q=vendeuse&l=Lausanne,%20VD";
+      "https://fr.indeed.com/jobs?q=title%3A%28data%29&l=Bouches-du-Rh%C3%B4ne&fromage=14&radius=0&filter=0&sort=date&start=0";
 
     await page.goto(indeedUrl, { waitUntil: "networkidle2" });
 
+    const wb = browser.wsEndpoint();
+    console.log(wb);
+    await page.goto(indeedUrl);
+    browser.disconnect();
+    await wait(10_000);
+    browser = await puppeteerExtra.connect({
+      browserWSEndpoint: wb,
+    });
+    console.log("TOTO");
+    const pageList = await browser.pages();
+    console.log({ pageList });
+    const pages = await Promise.all(pageList.map((p) => p.title()));
+    page = pageList[pages.findIndex((p) => p)];
+    console.log(await Promise.all(pageList.map((p) => p.title())));
+    await page?.bringToFront();
+
+
     while (hasNextPage) {
-      // Wait for the Turnstile iframe if present (Cloudflare protection)
       const turnstileIframe = await page.$('iframe[src*="turnstile"]');
+      fs.writeFileSync("test.html", await page.content(), "utf8");
       if (turnstileIframe) {
         console.log("Detected Turnstile CAPTCHA, trying to solve...");
 
         const checkboxFrame = await page
           .frames()
-          .find((frame) => frame.url().includes("turnstile"));
+          .find((frame: any) => frame.url().includes("turnstile"));
         if (checkboxFrame) {
           await checkboxFrame.waitForSelector('input[type="checkbox"]');
           await checkboxFrame.click('input[type="checkbox"]'); // Click the CAPTCHA checkbox
@@ -51,12 +94,16 @@ async function scrapeIndeedJobDetails(): Promise<any> {
         }
       }
 
+      await page.screenshot({
+        path: 'screenshot.jpg'
+      })
+
       // Wait for the job listings to load
-      await page.waitForSelector("li.css-5lfssm"); // The class that contains the job card
+      await page.waitForSelector(".mosaic-provider-jobcards > ul > li:not(:has(div.mosaic-empty-zone))", {timeout:60_000}); // The class that contains the job card
 
       // Scrape job details
       const jobDetails = await page.evaluate(() => {
-        const jobCards = document.querySelectorAll("li.css-5lfssm");
+        const jobCards = document.querySelectorAll(".mosaic-provider-jobcards > ul > li:not(:has(div.mosaic-empty-zone))");
 
         // Extract details from each job card
         const jobs = Array.from(jobCards).map((jobCard) => {
@@ -105,6 +152,7 @@ async function scrapeIndeedJobDetails(): Promise<any> {
 
         return jobs;
       });
+      console.log(jobDetails)
 
       allJobDetails.push(...jobDetails);
 
@@ -149,8 +197,3 @@ async function scrapeIndeedJobDetails(): Promise<any> {
     }
   }
 }
-
-// For Lambda or local invocation
-export const handler = async (event: any) => {
-  return await scrapeIndeedJobDetails();
-};
