@@ -1,64 +1,168 @@
-import chromium from "chrome-aws-lambda";
+import chromium from "@sparticuz/chromium";
+import wait from "promisify-wait";
 import puppeteerExtra from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
+import Anonymize from "puppeteer-extra-plugin-anonymize-ua";
+import createPuppeteerStealth from "puppeteer-extra-plugin-stealth";
 
-// Use stealth plugin to avoid detection
-puppeteerExtra.use(StealthPlugin());
+const puppeteerStealth = createPuppeteerStealth();
+puppeteerStealth.enabledEvasions.delete("user-agent-override");
 
+puppeteerExtra.use(AdblockerPlugin()).use(puppeteerStealth).use(Anonymize());
+
+const normalizeUserAgent = () => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      let browser = await puppeteerExtra.launch({
+        defaultViewport: chromium.defaultViewport,
+        executablePath: (await chromium.executablePath()) || undefined,
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-setuid-sandbox",
+        ],
+      });
+      let userAgent = await browser.userAgent();
+      let normalized = userAgent.replace("Headless", "");
+      normalized = normalized.replace("Chromium", "Chrome");
+      await browser.close();
+      resolve(normalized);
+    } catch (e) {
+      resolve(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+      );
+    }
+  });
+};
 async function scrapeIndeedJobDetails(): Promise<any> {
   let browser = null;
+  const initialUserAgent = await normalizeUserAgent();
 
   try {
     browser = await puppeteerExtra.launch({
       defaultViewport: chromium.defaultViewport,
-      executablePath: (await chromium.executablePath) || undefined,
+      executablePath: (await chromium.executablePath()) || undefined,
       headless: true,
+      protocolTimeout: 60000,
       args: [
+        `--user-agent=${initialUserAgent}`,
         "--no-sandbox",
-        "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--disable-gpu",
+        "--disable-setuid-sandbox",
       ],
     });
-
-    const page = await browser.newPage();
-
+    let page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
+    await page.setJavaScriptEnabled(true);
     let hasNextPage = true;
     const allJobDetails: any[] = [];
-    // Navigate to the Indeed job search page
     const indeedUrl =
-      "https://ch-fr.indeed.com/jobs?q=vendeuse&l=Lausanne,%20VD";
+      "https://fr.indeed.com/jobs?q=title%3A%28data%29&l=Bouches-du-Rh%C3%B4ne&fromage=14&radius=0&sort=date&filter=0&start=0";
 
-    await page.goto(indeedUrl, { waitUntil: "networkidle2" });
+    const wb = browser.wsEndpoint();
+    console.log(wb);
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false }); // Remove `webdriver` property
+    });
+    await page.evaluateOnNewDocument(() => {
+      // Fake plugins
+      Object.defineProperty(navigator, "plugins", {
+        get: () => [1, 2, 3, 4, 5],
+      });
 
+      // Fake mimeTypes
+      Object.defineProperty(navigator, "mimeTypes", {
+        get: () => [{ type: "application/pdf" }],
+      });
+    });
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["en-US", "en"],
+      });
+      Object.defineProperty(navigator, "platform", { get: () => "Win32" });
+    });
+    await page.evaluateOnNewDocument(() => {
+      const getParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        // Spoof vendor and renderer to fake a real GPU
+        if (parameter === 37445) return "Intel Inc.";
+        if (parameter === 37446) return "Intel Iris OpenGL Engine";
+        return getParameter(parameter);
+      };
+    });
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36"
+    );
+    // await page.setViewport({ width: 1280, height: 800 });
+
+    await page.goto(indeedUrl);
+
+    browser.disconnect();
+
+    console.log("WAIT");
+    await wait(60000);
+    browser = await puppeteerExtra.connect({
+      browserWSEndpoint: wb,
+      protocolTimeout: 60000,
+    });
+    console.log("Reconnect");
+    const pageList = await browser.pages();
+    const pages = await Promise.all(pageList.map((p) => p.title()));
+    page = pageList[pages.findIndex((p) => p)];
+    await page?.bringToFront();
+
+    await page.screenshot({
+      path: "screen2.png",
+    });
+    const frame = page
+      .frames()
+      .find((f) =>
+        f.url().startsWith("https://challenges.cloudflare.com/cdn-cgi")
+      );
+
+    console.log({ frames: frame?.url() });
+    if (frame) {
+      const boudingbox = await (await page.$("#rXOa8"))?.boundingBox()!;
+
+      console.log(boudingbox);
+      if (boudingbox)
+        await page.mouse.click(
+          boudingbox.x + boudingbox.width / 2,
+          boudingbox.y + boudingbox.height / 2
+        );
+      if (boudingbox)
+        await page.mouse.click(
+          boudingbox.x + boudingbox.width / 9,
+          boudingbox.y + boudingbox.height / 2
+        );
+      browser.disconnect();
+
+      console.log("WAIT");
+      await wait(30000);
+      browser = await puppeteerExtra.connect({
+        browserWSEndpoint: wb,
+      });
+      console.log("Reconnect");
+      const pageList = await browser.pages();
+      const pages = await Promise.all(pageList.map((p) => p.title()));
+      page = pageList[pages.findIndex((p) => p)];
+      await page?.bringToFront();
+      console.log("Cloudflare CAPTCHA detected.");
+    }
     while (hasNextPage) {
-      // Wait for the Turnstile iframe if present (Cloudflare protection)
-      const turnstileIframe = await page.$('iframe[src*="turnstile"]');
-      if (turnstileIframe) {
-        console.log("Detected Turnstile CAPTCHA, trying to solve...");
-
-        const checkboxFrame = await page
-          .frames()
-          .find((frame) => frame.url().includes("turnstile"));
-        if (checkboxFrame) {
-          await checkboxFrame.waitForSelector('input[type="checkbox"]');
-          await checkboxFrame.click('input[type="checkbox"]'); // Click the CAPTCHA checkbox
-          console.log("Checkbox clicked! Waiting for CAPTCHA to complete...");
-
-          // Wait for the CAPTCHA to be solved
-          await new Promise((resolve) => setTimeout(resolve, 5000)); // Equivalent to page.waitForTimeout
-        }
-      }
-
-      // Wait for the job listings to load
-      await page.waitForSelector("li.css-5lfssm"); // The class that contains the job card
-
-      // Scrape job details
+      await page.screenshot({
+        path: "screen3.png",
+      });
+      await page.waitForSelector(
+        ".mosaic-provider-jobcards > ul > li:not(:has(div.mosaic-empty-zone))"
+      );
       const jobDetails = await page.evaluate(() => {
-        const jobCards = document.querySelectorAll("li.css-5lfssm");
-
-        // Extract details from each job card
+        const jobCards = document.querySelectorAll(
+          ".mosaic-provider-jobcards > ul > li:not(:has(div.mosaic-empty-zone))"
+        );
         const jobs = Array.from(jobCards).map((jobCard) => {
           const titleElement = jobCard.querySelector("h2.jobTitle a");
           const companyElement = jobCard.querySelector(
@@ -74,7 +178,6 @@ async function scrapeIndeedJobDetails(): Promise<any> {
             '[data-testid="myJobsStateDate"]'
           );
 
-          // Extract the job link and ID
           const jobLink = titleElement
             ? (titleElement as HTMLAnchorElement).href
             : null;
@@ -116,7 +219,6 @@ async function scrapeIndeedJobDetails(): Promise<any> {
       });
 
       if (nextPageUrl) {
-        // Navigate to the next page if "Next Page" button exists
         await page.goto(nextPageUrl, { waitUntil: "networkidle2" });
       } else {
         hasNextPage = false;
@@ -124,7 +226,6 @@ async function scrapeIndeedJobDetails(): Promise<any> {
       }
     }
 
-    // Output the scraped job details
     console.log("Scraped Job Details:", allJobDetails);
     console.log("Yes you scrapped", allJobDetails?.length);
 
@@ -150,7 +251,6 @@ async function scrapeIndeedJobDetails(): Promise<any> {
   }
 }
 
-// For Lambda or local invocation
 export const handler = async (event: any) => {
   return await scrapeIndeedJobDetails();
 };
