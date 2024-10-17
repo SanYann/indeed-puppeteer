@@ -9,6 +9,7 @@
         "build": "tsc"
     },
     "dependencies": {
+        "@2captcha/captcha-solver": "^1.2.0",
         "@sparticuz/chromium": "129.0.0",
         "axios": "^1.7.7",
         "promisify-wait": "^1.1.0",

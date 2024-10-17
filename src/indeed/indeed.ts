@@ -1,5 +1,6 @@
+import { Solver } from "@2captcha/captcha-solver";
 import chromium from "@sparticuz/chromium";
-import wait from "promisify-wait";
+import { readFileSync } from "fs";
 import puppeteerExtra from "puppeteer-extra";
 import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
 import Anonymize from "puppeteer-extra-plugin-anonymize-ua";
@@ -9,6 +10,7 @@ const puppeteerStealth = createPuppeteerStealth();
 puppeteerStealth.enabledEvasions.delete("user-agent-override");
 
 puppeteerExtra.use(AdblockerPlugin()).use(puppeteerStealth).use(Anonymize());
+const solver = new Solver(process.env.API_KEY!);
 
 const normalizeUserAgent = () => {
   return new Promise(async (resolve, reject) => {
@@ -16,7 +18,6 @@ const normalizeUserAgent = () => {
       let browser = await puppeteerExtra.launch({
         defaultViewport: chromium.defaultViewport,
         executablePath: (await chromium.executablePath()) || undefined,
-        headless: true,
         args: [
           "--no-sandbox",
           "--disable-dev-shm-usage",
@@ -40,19 +41,26 @@ async function scrapeIndeedJobDetails(): Promise<any> {
   const initialUserAgent = await normalizeUserAgent();
 
   try {
+    await chromium.font(
+      "https://raw.githack.com/googlei18n/noto-emoji/master/fonts/NotoColorEmoji.ttf"
+    );
     browser = await puppeteerExtra.launch({
       defaultViewport: chromium.defaultViewport,
       executablePath: (await chromium.executablePath()) || undefined,
-      headless: true,
       protocolTimeout: 60000,
+      headless: chromium.headless,
       args: [
         `--user-agent=${initialUserAgent}`,
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-setuid-sandbox",
+        "--single-process",
       ],
     });
     let page = await browser.newPage();
+    const preloadFile = readFileSync("./inject.js", "utf8");
+    await page.evaluateOnNewDocument(preloadFile);
+
     await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
     await page.setJavaScriptEnabled(true);
     let hasNextPage = true;
@@ -61,7 +69,6 @@ async function scrapeIndeedJobDetails(): Promise<any> {
       "https://fr.indeed.com/jobs?q=title%3A%28data%29&l=Bouches-du-Rh%C3%B4ne&fromage=14&radius=0&sort=date&filter=0&start=0";
 
     const wb = browser.wsEndpoint();
-    console.log(wb);
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => false }); // Remove `webdriver` property
     });
@@ -96,66 +103,32 @@ async function scrapeIndeedJobDetails(): Promise<any> {
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36"
     );
-    // await page.setViewport({ width: 1280, height: 800 });
+    page.on("console", async (msg) => {
+      const txt = msg.text();
+      if (txt.includes("intercepted-params:")) {
+        const params = JSON.parse(txt.replace("intercepted-params:", ""));
+        console.log(params);
 
-    await page.goto(indeedUrl);
-
-    browser.disconnect();
-
-    console.log("WAIT");
-    await wait(60000);
-    browser = await puppeteerExtra.connect({
-      browserWSEndpoint: wb,
-      protocolTimeout: 60000,
+        try {
+          console.log(`Solving the captcha...`);
+          const res = await solver.cloudflareTurnstile(params);
+          console.log(`Solved the captcha ${res.id}`);
+          console.log(res);
+          await page.evaluate((token) => {
+            cfCallback(token);
+          }, res.data);
+        } catch (e) {
+          console.log(e);
+          return process.exit();
+        }
+      } else {
+        return;
+      }
     });
-    console.log("Reconnect");
-    const pageList = await browser.pages();
-    const pages = await Promise.all(pageList.map((p) => p.title()));
-    page = pageList[pages.findIndex((p) => p)];
-    await page?.bringToFront();
 
-    await page.screenshot({
-      path: "screen2.png",
-    });
-    const frame = page
-      .frames()
-      .find((f) =>
-        f.url().startsWith("https://challenges.cloudflare.com/cdn-cgi")
-      );
+    await page.goto(indeedUrl, { waitUntil: "networkidle2" });
 
-    console.log({ frames: frame?.url() });
-    if (frame) {
-      const boudingbox = await (await page.$("#rXOa8"))?.boundingBox()!;
-
-      console.log(boudingbox);
-      if (boudingbox)
-        await page.mouse.click(
-          boudingbox.x + boudingbox.width / 2,
-          boudingbox.y + boudingbox.height / 2
-        );
-      if (boudingbox)
-        await page.mouse.click(
-          boudingbox.x + boudingbox.width / 9,
-          boudingbox.y + boudingbox.height / 2
-        );
-      browser.disconnect();
-
-      console.log("WAIT");
-      await wait(30000);
-      browser = await puppeteerExtra.connect({
-        browserWSEndpoint: wb,
-      });
-      console.log("Reconnect");
-      const pageList = await browser.pages();
-      const pages = await Promise.all(pageList.map((p) => p.title()));
-      page = pageList[pages.findIndex((p) => p)];
-      await page?.bringToFront();
-      console.log("Cloudflare CAPTCHA detected.");
-    }
     while (hasNextPage) {
-      await page.screenshot({
-        path: "screen3.png",
-      });
       await page.waitForSelector(
         ".mosaic-provider-jobcards > ul > li:not(:has(div.mosaic-empty-zone))"
       );
@@ -254,3 +227,6 @@ async function scrapeIndeedJobDetails(): Promise<any> {
 export const handler = async (event: any) => {
   return await scrapeIndeedJobDetails();
 };
+function cfCallback(token: string) {
+  throw new Error("Function not implemented.");
+}
